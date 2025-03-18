@@ -33,6 +33,10 @@ class Configuration:
         self.anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
         self.llm_model = os.getenv("LLM_MODEL", "gpt-4-turbo")
 
+        # MCP Slack server configuration
+        self.mcp_server_oauth = os.getenv("MCP_SERVER_OAUTH")
+        self.mcp_team_id = os.getenv("TEAM_ID")
+
     @staticmethod
     def load_env() -> None:
         """Load environment variables from .env file."""
@@ -107,9 +111,9 @@ class Server:
         server_params = StdioServerParameters(
             command=command,
             args=self.config["args"],
-            env={**os.environ, **self.config["env"]}
-            if self.config.get("env")
-            else None,
+            env=(
+                {**os.environ, **self.config["env"]} if self.config.get("env") else None
+            ),
         )
         try:
             stdio_transport = await self.exit_stack.enter_async_context(
@@ -535,18 +539,24 @@ class SlackMCPBot:
             system_message = {
                 "role": "system",
                 "content": (
-                    f"""You are a helpful assistant with access to the following tools:
+                    f"""You are a helpful slack bot with the following tools:
 
 {tools_text}
 
-When you need to use a tool, you MUST format your response exactly like this:
+You can use multiple tools (up to 10) to fulfill a user's request before providing a final response.
+Make all of your tool calls BEFORE responding to the user otherwise, they will not be able to see the results.
+
+Your goal should always be to provide useful information answering the user's question, or their implied question. Many of these tools respond with metadata that is uninteresting. Make sure to summarize effectively and to focus on what the member actually wants.
+
+When you need to use tools, you MUST format your response exactly like this for each tool:
 [TOOL] tool_name
 {{"param1": "value1", "param2": "value2"}}
 
-Make sure to include both the tool name AND the JSON arguments.
+You can call multiple tools by including multiple [TOOL] blocks in your response.
+Make sure to include both the tool name AND the JSON arguments for each tool.
 Never leave out the JSON arguments.
 
-After receiving tool results, interpret them for the user in a helpful way.
+After receiving all tool results, provide a helpful interpretation that addresses the user's original request.
 """
                 ),
             }
@@ -568,7 +578,7 @@ After receiving tool results, interpret them for the user in a helpful way.
 
             # Process tool calls in the response
             if "[TOOL]" in response:
-                response = await self._process_tool_call(response, channel)
+                response = await self._process_tool_calls(response, channel)
 
             # Add assistant response to conversation history
             self.conversations[channel]["messages"].append(
@@ -583,97 +593,166 @@ After receiving tool results, interpret them for the user in a helpful way.
             logging.error(f"Error processing message: {e}", exc_info=True)
             await say(text=error_message, channel=channel, thread_ts=thread_ts)
 
-    async def _process_tool_call(self, response: str, channel: str) -> str:
-        """Process a tool call from the LLM response."""
+    async def _process_tool_calls(self, response: str, channel: str) -> str:
+        """Process multiple tool calls from the LLM response."""
         try:
-            # Extract tool name and arguments
-            tool_parts = response.split("[TOOL]")[1].strip().split("\n", 1)
-            tool_name = tool_parts[0].strip()
+            # Check if there are any tool calls
+            if "[TOOL]" not in response:
+                return response
 
-            # Handle incomplete tool calls
-            if len(tool_parts) < 2:
-                return (
-                    f"I tried to use the tool '{tool_name}', but the request "
-                    f"was incomplete. Here's my response without the tool:"
-                    f"\n\n{response.split('[TOOL]')[0]}"
-                )
+            # Split the response into parts based on [TOOL] tag
+            parts = response.split("[TOOL]")
+            non_tool_content = parts[0]  # Content before the first tool call
+            tool_parts = parts[1:]  # All tool call parts
 
-            # Parse JSON arguments
-            try:
-                args_text = tool_parts[1].strip()
-                arguments = json.loads(args_text)
-            except json.JSONDecodeError:
-                return (
-                    f"I tried to use the tool '{tool_name}', but the arguments "
-                    f"were not properly formatted. Here's my response without "
-                    f"the tool:\n\n{response.split('[TOOL]')[0]}"
-                )
+            # Limit to max 10 tool calls
+            if len(tool_parts) > 10:
+                tool_parts = tool_parts[:10]
+                logging.warning(f"Limiting to 10 tool calls out of {len(parts) - 1}")
 
-            # Find the appropriate server for this tool
-            for server in self.servers:
-                server_tools = [tool.name for tool in await server.list_tools()]
-                if tool_name in server_tools:
-                    # Execute the tool
-                    tool_result = await server.execute_tool(tool_name, arguments)
+            tool_results = []
 
-                    # Add tool result to conversation history
-                    tool_result_msg = f"Tool result for {tool_name}:\n{tool_result}"
-                    self.conversations[channel]["messages"].append(
-                        {"role": "system", "content": tool_result_msg}
+            # Process each tool call
+            for i, tool_part in enumerate(tool_parts):
+                try:
+                    # Extract tool name and arguments
+                    tool_lines = tool_part.strip().split("\n", 1)
+                    tool_name = tool_lines[0].strip()
+
+                    # Handle incomplete tool calls
+                    if len(tool_lines) < 2:
+                        tool_results.append(
+                            {
+                                "tool": tool_name,
+                                "success": False,
+                                "error": "Incomplete tool call - no arguments provided",
+                                "result": None,
+                            }
+                        )
+                        continue
+
+                    # Parse JSON arguments
+                    try:
+                        args_text = tool_lines[1].strip()
+                        arguments = json.loads(args_text)
+                    except json.JSONDecodeError:
+                        tool_results.append(
+                            {
+                                "tool": tool_name,
+                                "success": False,
+                                "error": "Invalid JSON arguments",
+                                "result": None,
+                            }
+                        )
+                        continue
+
+                    # Find the appropriate server for this tool
+                    tool_executed = False
+                    for server in self.servers:
+                        server_tools = [tool.name for tool in await server.list_tools()]
+                        if tool_name in server_tools:
+                            # Execute the tool
+                            tool_executed = True
+                            try:
+                                result = await server.execute_tool(tool_name, arguments)
+                                tool_results.append(
+                                    {
+                                        "tool": tool_name,
+                                        "success": True,
+                                        "arguments": arguments,
+                                        "result": result,
+                                    }
+                                )
+                            except Exception as e:
+                                tool_results.append(
+                                    {
+                                        "tool": tool_name,
+                                        "success": False,
+                                        "arguments": arguments,
+                                        "error": str(e),
+                                        "result": None,
+                                    }
+                                )
+                            break
+
+                    if not tool_executed:
+                        tool_results.append(
+                            {
+                                "tool": tool_name,
+                                "success": False,
+                                "error": f"Tool '{tool_name}' not available",
+                                "result": None,
+                            }
+                        )
+
+                except Exception as e:
+                    logging.error(f"Error processing tool call: {e}", exc_info=True)
+                    tool_results.append(
+                        {
+                            "tool": f"Unknown (parsing error in tool call {i+1})",
+                            "success": False,
+                            "error": str(e),
+                            "result": None,
+                        }
                     )
 
-                    try:
-                        # Get interpretation from LLM
-                        messages = [
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are a helpful assistant. You've just "
-                                    "used a tool and received results. Interpret "
-                                    "these results for the user in a clear, "
-                                    "helpful way."
-                                ),
-                            },
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"I used the tool {tool_name} with arguments "
-                                    f"{args_text} and got this result:\n\n"
-                                    f"{tool_result}\n\n"
-                                    f"Please interpret this result for me."
-                                ),
-                            },
-                        ]
+            # Build a message with all tool results for the LLM
+            tool_results_text = ""
+            for i, result in enumerate(tool_results):
+                tool_name = result["tool"]
+                if result["success"]:
+                    result_data = result["result"]
+                    # Format the result data
+                    if isinstance(result_data, dict):
+                        result_str = json.dumps(result_data, indent=2)
+                    else:
+                        result_str = str(result_data)
+                    tool_results_text += f"\n\nTool {i+1}: {tool_name}\nSuccess: True\nResult:\n{result_str}"
+                else:
+                    error = result.get("error", "Unknown error")
+                    tool_results_text += (
+                        f"\n\nTool {i+1}: {tool_name}\nSuccess: False\nError: {error}"
+                    )
 
-                        interpretation = await self.llm_client.get_response(messages)
-                        return interpretation
-                    except Exception as e:
-                        logging.error(
-                            f"Error getting tool result interpretation: {e}",
-                            exc_info=True,
-                        )
-                        # Fallback to basic formatting
-                        if isinstance(tool_result, dict):
-                            result_text = json.dumps(tool_result, indent=2)
-                        else:
-                            result_text = str(tool_result)
-                        return (
-                            f"I used the {tool_name} tool and got these results:"
-                            f"\n\n```\n{result_text}\n```"
-                        )
-
-            # No server had the tool
-            return (
-                f"I tried to use the tool '{tool_name}', but it's not available. "
-                f"Here's my response without the tool:\n\n{response.split('[TOOL]')[0]}"
+            # Record all tool results in conversation history
+            tool_result_msg = f"Tool results:\n{tool_results_text}"
+            self.conversations[channel]["messages"].append(
+                {"role": "system", "content": tool_result_msg}
             )
+
+            # Get final interpretation from LLM
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant. You've just used multiple tools and received results. "
+                        "Interpret these results for the user in a clear, helpful way that addresses their original question. "
+                        "Focus on the most relevant information from the tool results."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"I executed {len(tool_results)} tools based on the request and got these results:"
+                        f"{tool_results_text}\n\n"
+                        f"Please provide a helpful response that addresses the original question using this information."
+                    ),
+                },
+            ]
+
+            interpretation = await self.llm_client.get_response(messages)
+            return interpretation
 
         except Exception as e:
-            logging.error(f"Error executing tool: {e}", exc_info=True)
+            logging.error(f"Error executing tools: {e}", exc_info=True)
             return (
-                f"I tried to use a tool, but encountered an error: {str(e)}\n\n"
-                f"Here's my response without the tool:\n\n{response.split('[TOOL]')[0]}"
+                f"I tried to use one or more tools, but encountered an error: {str(e)}\n\n"
+                f"Here's my response without the tools:\n\n{response.split('[TOOL]')[0]}"
             )
+
+    async def _process_tool_call(self, response: str, channel: str) -> str:
+        """Legacy method - redirects to the new multiple tool call processor."""
+        return await self._process_tool_calls(response, channel)
 
     async def start(self) -> None:
         """Start the Slack bot."""
@@ -711,7 +790,31 @@ async def main() -> None:
             "SLACK_BOT_TOKEN and SLACK_APP_TOKEN must be set in environment variables"
         )
 
-    server_config = config.load_config("servers_config.json")
+    # Get this file from the servers config that is in the same directory as this file
+    server_config = config.load_config(
+        os.path.join(os.path.dirname(__file__), "servers_config.json")
+    )
+
+    # Inject environment variables into server configurations
+    if (
+        "slack" in server_config["mcpServers"]
+        and config.mcp_server_oauth
+        and config.mcp_team_id
+    ):
+        if "env" not in server_config["mcpServers"]["slack"]:
+            server_config["mcpServers"]["slack"]["env"] = {}
+
+        # Map environment variables to the expected Slack MCP server configuration
+        server_config["mcpServers"]["slack"]["env"].update(
+            {
+                "SLACK_BOT_TOKEN": config.mcp_server_oauth,
+                "SLACK_TEAM_ID": config.mcp_team_id,
+            }
+        )
+        logging.info(
+            "Injected MCP Slack server configuration from environment variables"
+        )
+
     servers = [
         Server(name, srv_config)
         for name, srv_config in server_config["mcpServers"].items()
