@@ -150,7 +150,8 @@ class SlackEventHandlers:
 
 STEP 1: Initial Greeting - DO NOT USE ANY TOOL YET
 - Acknowledge the user's request
-- Tell them what tools you'll use to help them
+- Tell them what tools you'll use to help them.
+- Make a thorough plan.
 
 STEP 2: Tool Usage - EACH RESPONSE MUST CONTAIN EXACTLY ONE TOOL CALL
 - For each tool you need, make ONE separate response with ONLY that tool call
@@ -160,6 +161,7 @@ STEP 2: Tool Usage - EACH RESPONSE MUST CONTAIN EXACTLY ONE TOOL CALL
 
 STEP 3: Progress Updates - USE HANDOFF TOOL BETWEEN REGULAR TOOLS
 - After each regular tool call, send a handoff message to explain what you found and what you'll do next
+- You must be thorough and keep using tools until you have all the information you need. If one tool fails, don't assume they all will. 
 - Format the handoff EXACTLY like this:
   [TOOL] handoff
   {{"message": "I found X using the first tool. Now I'll use Y tool to..."}}
