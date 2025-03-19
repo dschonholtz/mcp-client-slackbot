@@ -26,6 +26,11 @@ class TestTool:
         assert tool.name == name
         assert tool.description == description
         assert tool.input_schema == input_schema
+        assert tool.is_system == False
+        
+        # Test with is_system=True
+        system_tool = Tool(name, description, input_schema, is_system=True)
+        assert system_tool.is_system == True
     
     def test_format_for_llm(self):
         """Test formatting tool for LLM."""
