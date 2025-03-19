@@ -152,23 +152,37 @@ class SlackEventHandlers:
 
 {tools_text}
 
-Instructions for using tools:
-1. You can use multiple tools to fulfill a user's request.
-2. When you need to use tools, format your response exactly like this for each tool:
-   [TOOL] tool_name
-   {{"param1": "value1", "param2": "value2"}}
+MANDATORY TOOL FORMATTING INSTRUCTIONS:
+When you need to use tools, you MUST format your response EXACTLY like this:
 
-3. For complex tasks, you SHOULD use the "handoff" tool to show intermediate progress:
-   - Use it to tell the user what tools you're going to use and why
-   - Use it to show progress after each tool execution
-   - These messages will be displayed in italics, letting the user know you're still working
+[TOOL] handoff
+{{"message": "I'm working on your request using the X tool..."}}
 
-4. After you've completed your work, you MUST use the "end_response" tool to finish
-   the conversation.
+or 
 
-5. Always specify both the tool name AND the JSON arguments for each tool.
+[TOOL] tool_name
+{{"param1": "value1", "param2": "value2"}}
 
-Make sure to summarize effectively and focus on what the user actually wants.
+or
+
+[TOOL] end_response
+{{}}
+
+Important notes:
+1. The format must be EXACTLY as shown - the [TOOL] tag, followed by a space, followed by the tool name, followed by a newline, followed by a properly formatted JSON object.
+2. The JSON object MUST be properly formatted and valid JSON.
+3. For complex tasks, you MUST use the "handoff" tool to show intermediate progress.
+4. You MUST use the "end_response" tool to finish the conversation after providing your final answer.
+5. You MUST show which tools you are using and why.
+
+Example of a good response:
+[TOOL] handoff
+{{"message": "I'll help you list the channels in your Slack workspace. Let me gather that information."}}
+
+[TOOL] list_channels
+{{}}
+
+Remember, this exact format is required for tool execution to work properly.
 """
                 ),
             }
@@ -184,7 +198,7 @@ Make sure to summarize effectively and focus on what the user actually wants.
 
             # Send initial response to acknowledge the request
             initial_response = await self.llm_client.get_response(
-                messages + [{"role": "system", "content": "Generate a brief initial response acknowledging the user's request and mentioning what tools you plan to use. Do NOT include any tool calls in this response."}]
+                messages + [{"role": "system", "content": "Generate a brief initial response acknowledging the user's request and mentioning what tools you plan to use. IMPORTANT: Do NOT include ANY [TOOL] tags in this response. This is just the initial greeting message."}]
             )
             await say(text=initial_response, channel=channel, thread_ts=thread_ts)
             self.conversation_manager.add_message(conversation_id, "assistant", initial_response)
@@ -218,9 +232,11 @@ Make sure to summarize effectively and focus on what the user actually wants.
             
             # Get LLM response for next action
             response = await self.llm_client.get_response(messages)
+            logging.info(f"LLM response: {response}")
             
             # Process any tool calls in the response
             if "[TOOL]" not in response:
+                logging.info("No tool calls found in response")
                 # If no tools called, just send the response and end
                 await say(text=response, channel=channel, thread_ts=thread_ts)
                 self.conversation_manager.add_message(conversation_id, "assistant", response)
@@ -229,6 +245,7 @@ Make sure to summarize effectively and focus on what the user actually wants.
                 
             # Parse tool calls
             non_tool_content, tool_calls = ToolParser.split_response(response)
+            logging.info(f"Parsed tool calls: {tool_calls}")
             
             # Process each tool call
             for tool_call in tool_calls:
@@ -251,12 +268,29 @@ Make sure to summarize effectively and focus on what the user actually wants.
                     break
                     
                 # For regular tools, execute them and show progress
+                tool_found = False
+                
+                # List all available tools for debugging
+                all_available_tools = []
+                for server in self.tool_executor.servers:
+                    try:
+                        server_tool_list = await server.list_tools()
+                        server_tools = [tool.name for tool in server_tool_list]
+                        all_available_tools.extend(server_tools)
+                    except Exception as e:
+                        logging.error(f"Error listing tools on server: {e}")
+                
+                logging.info(f"All available tools: {all_available_tools}")
+                logging.info(f"Looking for tool: {tool_name}")
+                
                 for server in self.tool_executor.servers:
                     try:
                         server_tools = [tool.name for tool in await server.list_tools()]
                         if tool_name in server_tools:
+                            tool_found = True
                             # Notify user which tool is being used
                             tool_msg = f"_Using tool: {tool_name}_"
+                            logging.info(f"Executing tool: {tool_name} with arguments: {arguments}")
                             await say(text=tool_msg, channel=channel, thread_ts=thread_ts)
                             
                             # Execute the tool
@@ -268,6 +302,8 @@ Make sure to summarize effectively and focus on what the user actually wants.
                                 else:
                                     result_str = str(result)
                                 
+                                logging.info(f"Tool {tool_name} result: {result_str}")
+                                
                                 # Add tool result to messages for LLM context
                                 messages.append({
                                     "role": "system", 
@@ -275,6 +311,7 @@ Make sure to summarize effectively and focus on what the user actually wants.
                                 })
                             except Exception as e:
                                 error_msg = f"_Error executing tool {tool_name}: {str(e)}_"
+                                logging.error(f"Error executing tool {tool_name}: {e}")
                                 await say(text=error_msg, channel=channel, thread_ts=thread_ts)
                                 messages.append({
                                     "role": "system", 
@@ -284,6 +321,15 @@ Make sure to summarize effectively and focus on what the user actually wants.
                     except Exception as e:
                         logging.error(f"Error checking tools on server: {e}")
                         continue
+                
+                if not tool_found and tool_name not in ["handoff", "end_response"]:
+                    error_msg = f"_Tool not found: {tool_name}_"
+                    logging.warning(f"Tool not found: {tool_name}")
+                    await say(text=error_msg, channel=channel, thread_ts=thread_ts)
+                    messages.append({
+                        "role": "system", 
+                        "content": f"Tool {tool_name} not found. Available tools: {', '.join(all_available_tools)}"
+                    })
             
             # If no end_response tool was called, continue the loop
             if not response_complete and iterations < max_iterations:
