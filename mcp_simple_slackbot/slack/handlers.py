@@ -43,23 +43,7 @@ class SlackEventHandlers:
         self.tools = tools.copy()  # Copy to avoid modifying the original list
         self.bot_id = bot_id
 
-        # Add system tools
-        self.handoff_tool = Tool(
-            name="handoff",
-            description="Use this tool to hand off your response to continue working on a complex task, showing your work in progress.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "The intermediate message to show the user, which will be displayed in italics",
-                    }
-                },
-                "required": ["message"],
-            },
-            is_system=True,
-        )
-
+        # Add system tool for ending the response
         self.end_response_tool = Tool(
             name="end_response",
             description="Use this tool to finish the conversation after providing your final answer. This will terminate the response.",
@@ -67,8 +51,7 @@ class SlackEventHandlers:
             is_system=True,
         )
 
-        # Add system tools to the tools list
-        self.tools.append(self.handoff_tool)
+        # Add system tool to the tools list
         self.tools.append(self.end_response_tool)
 
     def set_bot_id(self, bot_id: Optional[str]) -> None:
@@ -143,37 +126,36 @@ class SlackEventHandlers:
         try:
             # Create system message with tool descriptions
             tools_text = "\n".join([tool.format_for_llm() for tool in self.tools])
+            # Create message metadata with Slack context
+            message_metadata = {
+                "channel_id": channel,
+                "thread_timestamp": thread_ts,
+                "user_id": user_id,
+                "event": event,
+            }
             system_message = {
                 "role": "system",
                 "content": (
-                    f"""You are a helpful Slack bot with access to powerful tools. You MUST follow this EXACT conversation flow for EVERY request:
+                    f"""You are a helpful Slack bot with access to powerful tools. Follow this conversation flow:
 
-STEP 1: Initial Greeting - DO NOT USE ANY TOOL YET
+STEP 1: Initial Greeting
 - Acknowledge the user's request
-- Tell them what tools you'll use to help them.
-- Make a thorough plan.
+- Briefly explain your approach and what information you'll gather
 
-STEP 2: Tool Usage - EACH RESPONSE MUST CONTAIN EXACTLY ONE TOOL CALL
-- For each tool you need, make ONE separate response with ONLY that tool call
-- Format each tool call EXACTLY like this:
+STEP 2: Tool Usage (REPEAT AS NEEDED)
+- Use tools to gather all the information needed to answer the user's question
+- Make ONE tool call per response with the EXACT format:
   [TOOL] tool_name
   {{"param1": "value1", "param2": "value2"}}
+- Continue making tool calls until you have all the information needed
 
-STEP 3: Progress Updates - USE HANDOFF TOOL BETWEEN REGULAR TOOLS
-- After each regular tool call, send a handoff message to explain what you found and what you'll do next
-- You must be thorough and keep using tools until you have all the information you need. If one tool fails, don't assume they all will. 
-- Format the handoff EXACTLY like this:
-  [TOOL] handoff
-  {{"message": "I found X using the first tool. Now I'll use Y tool to..."}}
+STEP 3: Final Answer
+- Once you have all necessary information, provide a complete answer
+- Make this a plain text response without any tool calls
+- Format your response appropriately for the question (bullet points, paragraphs, etc.)
 
-STEP 4: Final Answer - REGULAR TEXT RESPONSE WITH YOUR FINDINGS
-- Provide a complete answer based on all tool results
-- Summarize what you found
-- DO NOT use any tool calls in this response
-
-STEP 5: End Conversation - MUST BE YOUR LAST RESPONSE
-- Use ONLY the end_response tool to finish
-- Format EXACTLY like this:
+STEP 4: End Conversation
+- After providing your final answer, end the conversation with the special end_response tool. It isn't listed with the other tools because it is a system tool that ends the conversation.
   [TOOL] end_response
   {{}}
 
@@ -182,50 +164,37 @@ Available tools:
 {tools_text}
 
 IMPORTANT RULES:
-1. NEVER combine multiple tool calls in a single response
-2. NEVER skip the final end_response tool call
-3. NEVER add extra text around tool calls - ONLY the [TOOL] format
-4. ALWAYS use handoff between tools to show progress
-5. ALWAYS make your final answer a plain text response WITHOUT tool calls
-6. ALWAYS end with the end_response tool in a separate response
+1. Make only ONE tool call per response - you can make multiple tool calls across multiple responses
+2. You MUST use tools to gather information before answering
+3. Always end with the end_response tool as your final response after providing your answer
+4. If there doesn't seem to be enough information. See if you can find the corresponding context in the thread with tools.
+5. If you really can't find the information you should say so and immediately end the conversation. BUT THIS IS A LAST RESORT.
 
-Example conversation flow:
-1. User: "Tell me about active Slack channels"
-2. You: "I'll help you get information about the active Slack channels. I'll use the list_channels tool to find all channels, then check each one's activity."
-3. You: "[TOOL] list_channels\\n{{}}"
-4. You: "[TOOL] handoff\\n{{\\"message\\": \\"I found 5 channels. I'll now check the activity in each one.\\"}}"
-5. You: "[TOOL] channel_history\\n{{\\"channel_id\\": \\"C12345\\"}}"
-6. You: "Based on my analysis, there are 5 active channels. The most active is #general with 120 messages today, followed by #random with 45 messages..."
-7. You: "[TOOL] end_response\\n{{}}"
-
-This specific flow with separate responses for each step is MANDATORY.
+Message metadata:
+{message_metadata}
 """
                 ),
             }
 
-            # Add user message to history
-            self.conversation_manager.add_message(conversation_id, "user", text)
+            # Add user message to history with metadata
+            # self.conversation_manager.add_message(conversation_id, "user", text)
+            user_message = {"role": "user", "content": text}
 
             # Set up messages for LLM
-            messages = [system_message]
+            messages = [system_message, user_message]
 
             # Add conversation history
-            messages.extend(self.conversation_manager.get_messages(conversation_id))
+            # messages.extend(self.conversation_manager.get_messages(conversation_id))
 
             # Send initial response to acknowledge the request
-            initial_response = await self.llm_client.get_response(
-                messages
-                + [
-                    {
-                        "role": "system",
-                        "content": "EXECUTE STEP 1 ONLY: Generate a brief initial greeting that acknowledges the user's request and explains what tools you plan to use. This should be plain text without any [TOOL] tags. Remember, this is just the first step of the conversation flow described in your instructions.",
-                    }
-                ]
-            )
+            initial_response = await self.llm_client.get_response(messages)
             await say(text=initial_response, channel=channel, thread_ts=thread_ts)
-            self.conversation_manager.add_message(
-                conversation_id, "assistant", initial_response
-            )
+
+            # Add assistant response to conversation history
+            # self.conversation_manager.add_message(
+            #     conversation_id, "assistant", initial_response
+            # )
+            # Add assistant response to LLM context
             messages.append({"role": "assistant", "content": initial_response})
 
             # Start the multi-turn tool execution process
@@ -256,88 +225,79 @@ This specific flow with separate responses for each step is MANDATORY.
             say: Function to send messages
         """
         response_complete = False
-        max_iterations = 10  # Limit the number of iterations to prevent infinite loops
+        max_iterations = 15  # Reasonable limit to prevent infinite loops
         iterations = 0
+
+        # Initial state after greeting is to expect a tool call
+        expect_tool_after_greeting = True
 
         while not response_complete and iterations < max_iterations:
             iterations += 1
 
             # Get LLM response for next action
             response = await self.llm_client.get_response(messages)
+            await say(text=response, channel=channel, thread_ts=thread_ts)
             logging.info(f"LLM response: {response}")
 
-            # Process any tool calls in the response
-            if "[TOOL]" not in response:
-                logging.info(
-                    "No tool calls found in response - treating as final answer"
-                )
-                # If no tools called, this should be the final summary response
-                await say(text=response, channel=channel, thread_ts=thread_ts)
-                self.conversation_manager.add_message(
-                    conversation_id, "assistant", response
-                )
+            # Add assistant response to messages list to maintain context
+            messages.append({"role": "assistant", "content": response})
 
-                # Prompt for the end_response tool
+            # Check if we just sent the greeting and enforce a tool call if needed
+            if expect_tool_after_greeting and "[TOOL]" not in response:
                 messages.append(
                     {
-                        "role": "system",
-                        "content": "Now proceed to STEP 5: End the conversation with the end_response tool. Send ONLY the end_response tool call.",
+                        "role": "user",
+                        "content": "You need to gather information using tools before you can answer the question. Please make a tool call now.",
                     }
                 )
+                # We don't remove the response here - we want to keep the reasoning but prompt for a tool call
+                expect_tool_after_greeting = False  # Only enforce this once
                 continue
 
-            # Parse tool calls - should be only one per response
+            # Parse tool calls
             non_tool_content, tool_calls = ToolParser.split_response(response)
             logging.info(f"Parsed tool calls: {tool_calls}")
 
+            # Handle tool parsing failures
+            if len(tool_calls) == 0 and "[TOOL]" in response:
+                logging.warning("Tool tag found but no valid tools parsed")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": 'Your tool call could not be parsed. Please use the exact format: [TOOL] tool_name\n{"param1": "value1"}',
+                    }
+                )
+                # Remove the invalid response from the context
+                messages.pop(-2)
+                continue
+
+            # Handle multiple tool calls in a single response
             if len(tool_calls) > 1:
                 logging.warning(
                     f"Multiple tool calls found in a single response: {len(tool_calls)}. Only processing the first one."
                 )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Please make only ONE tool call per response. I'll process your first tool call now.",
+                    }
+                )
                 tool_call = tool_calls[0]
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": "REMINDER: You should only include ONE tool call per response. Continue with the next tool or step.",
-                    }
-                )
-            elif len(tool_calls) == 0:
-                logging.warning("Tool tag found but no valid tools parsed")
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": "Your tool call could not be parsed. Please use the exact format specified in the instructions.",
-                    }
-                )
-                continue
+            elif len(tool_calls) == 1:
+                tool_call = tool_calls[0]
             else:
-                tool_call = tool_calls[0]
+                continue
 
-            # Process the single tool call
+            # Process the tool call
             tool_name = tool_call["tool_name"]
             arguments = tool_call["arguments"]
 
-            # Handle system tools
-            if tool_name == "handoff":
-                # Send intermediate message in italics
-                handoff_message = (
-                    f"_{arguments.get('message', 'Working on your request...')}_"
-                )
-                await say(text=handoff_message, channel=channel, thread_ts=thread_ts)
-                self.conversation_manager.add_message(
-                    conversation_id, "assistant", handoff_message
-                )
-                # Add to LLM context
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": f"I sent an intermediate message: {arguments.get('message')}",
-                    }
-                )
-                continue
-
-            elif tool_name == "end_response":
+            # Handle end_response tool
+            if tool_name == "end_response":
                 # End the response loop
+                await say(
+                    text="_Conversation complete_", channel=channel, thread_ts=thread_ts
+                )
                 response_complete = True
                 break
 
@@ -370,10 +330,14 @@ This specific flow with separate responses for each step is MANDATORY.
                             # Add tool result to messages for LLM context
                             messages.append(
                                 {
-                                    "role": "system",
+                                    "role": "user",
                                     "content": f"Tool {tool_name} executed successfully. Result:\n{result_str}",
                                 }
                             )
+
+                            # Reset the greeting flag as we've successfully used a tool
+                            expect_tool_after_greeting = False
+
                         except Exception as e:
                             error_msg = f"_Error executing tool {tool_name}: {str(e)}_"
                             logging.error(f"Error executing tool {tool_name}: {e}")
@@ -382,8 +346,8 @@ This specific flow with separate responses for each step is MANDATORY.
                             )
                             messages.append(
                                 {
-                                    "role": "system",
-                                    "content": f"Tool {tool_name} failed with error: {str(e)}",
+                                    "role": "user",
+                                    "content": f"Tool {tool_name} failed with error: {str(e)}. Try another approach or tool.",
                                 }
                             )
                         break
@@ -391,48 +355,22 @@ This specific flow with separate responses for each step is MANDATORY.
                     logging.error(f"Error checking tools on server: {e}")
                     continue
 
-            if not tool_found and tool_name not in ["handoff", "end_response"]:
+            if not tool_found and tool_name != "end_response":
                 error_msg = f"_Tool not found: {tool_name}_"
                 logging.warning(f"Tool not found: {tool_name}")
                 await say(text=error_msg, channel=channel, thread_ts=thread_ts)
                 messages.append(
                     {
-                        "role": "system",
-                        "content": f"Tool {tool_name} not found",
+                        "role": "user",
+                        "content": f"Tool {tool_name} not found. Please try a different available tool.",
                     }
                 )
 
-            # If no end_response tool was called, continue the loop
-            if not response_complete and iterations < max_iterations:
-                # Add a prompt for the LLM to continue with the next step in the flow
-                if tool_name == "handoff":
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (
-                                "Continue with STEP 2: Make your next tool call following the conversation flow. "
-                                "Remember to send only ONE tool call in your next response, exactly in the format specified."
-                            ),
-                        }
-                    )
-                elif tool_name == "end_response":
-                    # Should be handled by the response_complete flag, but just in case
-                    response_complete = True
-                else:
-                    # After a regular tool call, prompt for a handoff message
-                    messages.append(
-                        {
-                            "role": "system",
-                            "content": (
-                                "Continue with STEP 3: Send a handoff message explaining what you found and what you'll do next. "
-                                "If you have all the information needed, proceed to STEP 4 instead and provide your final answer without any tool calls."
-                            ),
-                        }
-                    )
-            elif iterations >= max_iterations:
-                # Safety measure: end if we've hit the max iterations
+            # If we've reached maximum iterations, force a conclusion
+            if iterations >= max_iterations:
+                # Force end the conversation
                 await say(
-                    text="I've reached the maximum number of steps for this request. Here's what I've found so far.",
+                    text="_Conversation ended due to reaching maximum number of steps_",
                     channel=channel,
                     thread_ts=thread_ts,
                 )

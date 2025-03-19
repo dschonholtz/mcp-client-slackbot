@@ -46,6 +46,36 @@ class TestConversationManager:
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there"}
         ]
+        
+    def test_add_message_with_metadata(self):
+        """Test add_message method with metadata."""
+        manager = ConversationManager()
+        
+        # Add a message with metadata
+        metadata = {"channel": "C12345", "thread_ts": "1234567890.123456", "user": "U67890"}
+        manager.add_message("test-conv", "user", "Hello", metadata=metadata)
+        
+        # Check that the message and metadata were added
+        assert manager.conversations["test-conv"]["messages"] == [
+            {
+                "role": "user", 
+                "content": "Hello", 
+                "metadata": metadata
+            }
+        ]
+        
+        # Add another message without metadata
+        manager.add_message("test-conv", "assistant", "Hi there")
+        
+        # Check that both messages are present with correct metadata
+        assert manager.conversations["test-conv"]["messages"] == [
+            {
+                "role": "user", 
+                "content": "Hello", 
+                "metadata": metadata
+            },
+            {"role": "assistant", "content": "Hi there"}
+        ]
     
     def test_get_messages(self):
         """Test get_messages method."""

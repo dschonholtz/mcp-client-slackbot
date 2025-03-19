@@ -20,7 +20,7 @@ def mock_conversation_manager():
     """Create a mock conversation manager."""
     manager = MagicMock()
     manager.get_messages.return_value = []
-    manager.add_message = AsyncMock()
+    # Don't make add_message an AsyncMock since it's not actually async in the real code
     return manager
 
 
