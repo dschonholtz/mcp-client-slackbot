@@ -43,29 +43,31 @@ pip install -r mcp_simple_slackbot/requirements.txt
 
 ### 3. Configure Environment Variables
 
-Create a `.env` file in the `mcp_simple_slackbot` directory (see `.env.example` for a template):
+Create a `.env` file in the project root directory:
 
+```bash
+# Copy the example file
+cp .env.example .env
+
+# Edit the file with your credentials
+nano .env  # or use your preferred editor
 ```
-# Slack API credentials
-SLACK_BOT_TOKEN=xoxb-your-token
-SLACK_APP_TOKEN=xapp-your-token
 
-# LLM API credentials
-OPENAI_API_KEY=sk-your-openai-key
-# or use GROQ_API_KEY or ANTHROPIC_API_KEY
+### 4. Install in Development Mode
 
-# LLM configuration
-LLM_MODEL=gpt-4-turbo
+```bash
+# Install the package in development mode
+pip install -e .
 ```
 
 ## Running the Bot
 
 ```bash
-# Navigate to the module directory
-cd mcp_simple_slackbot
+# Use the run script (recommended)
+./run.sh
 
-# Run the bot directly
-python main.py
+# Alternatively, run directly with Python
+venv/bin/python -m mcp_simple_slackbot
 ```
 
 The bot will:
@@ -82,18 +84,24 @@ The bot will:
 
 ## Architecture
 
-The bot is designed with a focused architecture:
+The bot has been refactored into a modular architecture with clear separation of concerns:
 
-1. **SlackMCPBot**: Core class managing Slack events and message processing
-2. **LLMClient**: Handles communication with LLM APIs (OpenAI, Groq, Anthropic)
-3. **Server**: Manages communication with MCP servers
-4. **Tool**: Represents available tools from MCP servers
+- **config/** - Configuration and settings
+- **mcp/** - MCP server and tool integration
+- **llm/** - LLM API integrations (OpenAI, Groq, Anthropic)
+- **slack/** - Slack app and event handlers
+- **conversation/** - Conversation history management
+- **tools/** - Tool execution and parsing
+- **utils/** - Logging and utility functions
 
 When a message is received, the bot:
 1. Sends the message to the LLM along with available tools
-2. If the LLM response includes a tool call, executes the tool
-3. Returns the result to the LLM for interpretation
-4. Delivers the final response to the user
+2. Parses the LLM response for tool calls
+3. Executes tools with the requested parameters
+4. Returns the result to the LLM for interpretation
+5. Delivers the final response to the user
+
+For more details on development, testing, and code style, see the [CLAUDE.md](CLAUDE.md) file.
 
 ## Credits
 
