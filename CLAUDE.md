@@ -39,7 +39,45 @@ venv/bin/pytest tests/integration
 
 # Run tests with verbosity
 venv/bin/pytest -v
+
+# Run tests with coverage reporting
+venv/bin/pytest --cov=mcp_simple_slackbot
+
+# Run specific test file
+venv/bin/pytest tests/unit/test_specific_file.py
+
+# Run tests matching a pattern
+venv/bin/pytest -k "test_pattern"
 ```
+
+## Testing Guidelines
+
+IMPORTANT: All code changes must be tested! Follow these guidelines:
+
+1. **Test-Driven Development**:
+   - Write tests before implementing features
+   - Run tests frequently during development
+
+2. **Test Coverage**:
+   - Unit tests for individual functions and classes
+   - Integration tests for component interactions
+   - Test both success and failure cases
+
+3. **Mocking**:
+   - Use pytest fixtures and mocks for external dependencies
+   - Use `pytest-asyncio` for testing async code
+   - Mock API calls and external services
+
+4. **Test Organization**:
+   - Place unit tests in `tests/unit/`
+   - Place integration tests in `tests/integration/`
+   - Name test files with `test_` prefix
+   - Name test functions with `test_` prefix
+
+5. **Test Verification**:
+   - Run tests before committing changes
+   - Run tests before submitting PRs
+   - Fix failing tests before moving on
 
 ## Code Style & Linting
 ```bash

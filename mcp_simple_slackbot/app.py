@@ -14,10 +14,10 @@ from mcp_simple_slackbot.utils.logging import setup_logging
 
 async def create_servers(config: Configuration) -> List[Server]:
     """Create MCP server instances.
-    
+
     Args:
         config: Application configuration
-        
+
     Returns:
         List of MCP server instances
     """
@@ -66,7 +66,7 @@ async def run_bot() -> None:
 
     # Create MCP servers
     servers = await create_servers(config)
-    
+
     # Create LLM client
     llm_client = LLMClient(config.llm_api_key, config.llm_model)
 
