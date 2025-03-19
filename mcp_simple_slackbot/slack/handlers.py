@@ -148,41 +148,57 @@ class SlackEventHandlers:
             system_message = {
                 "role": "system",
                 "content": (
-                    f"""You are a helpful slack bot with the following tools:
+                    f"""You are a helpful Slack bot with access to powerful tools. You MUST follow this EXACT conversation flow for EVERY request:
+
+STEP 1: Initial Greeting - DO NOT USE ANY TOOL YET
+- Acknowledge the user's request
+- Tell them what tools you'll use to help them
+
+STEP 2: Tool Usage - EACH RESPONSE MUST CONTAIN EXACTLY ONE TOOL CALL
+- For each tool you need, make ONE separate response with ONLY that tool call
+- Format each tool call EXACTLY like this:
+  [TOOL] tool_name
+  {{"param1": "value1", "param2": "value2"}}
+
+STEP 3: Progress Updates - USE HANDOFF TOOL BETWEEN REGULAR TOOLS
+- After each regular tool call, send a handoff message to explain what you found and what you'll do next
+- Format the handoff EXACTLY like this:
+  [TOOL] handoff
+  {{"message": "I found X using the first tool. Now I'll use Y tool to..."}}
+
+STEP 4: Final Answer - REGULAR TEXT RESPONSE WITH YOUR FINDINGS
+- Provide a complete answer based on all tool results
+- Summarize what you found
+- DO NOT use any tool calls in this response
+
+STEP 5: End Conversation - MUST BE YOUR LAST RESPONSE
+- Use ONLY the end_response tool to finish
+- Format EXACTLY like this:
+  [TOOL] end_response
+  {{}}
+
+Available tools:
 
 {tools_text}
 
-MANDATORY TOOL FORMATTING INSTRUCTIONS:
-When you need to use tools, you MUST format your response EXACTLY like this:
+IMPORTANT RULES:
+1. NEVER combine multiple tool calls in a single response
+2. NEVER skip the final end_response tool call
+3. NEVER add extra text around tool calls - ONLY the [TOOL] format
+4. ALWAYS use handoff between tools to show progress
+5. ALWAYS make your final answer a plain text response WITHOUT tool calls
+6. ALWAYS end with the end_response tool in a separate response
 
-[TOOL] handoff
-{{"message": "I'm working on your request using the X tool..."}}
+Example conversation flow:
+1. User: "Tell me about active Slack channels"
+2. You: "I'll help you get information about the active Slack channels. I'll use the list_channels tool to find all channels, then check each one's activity."
+3. You: "[TOOL] list_channels\\n{{}}"
+4. You: "[TOOL] handoff\\n{{\\"message\\": \\"I found 5 channels. I'll now check the activity in each one.\\"}}"
+5. You: "[TOOL] channel_history\\n{{\\"channel_id\\": \\"C12345\\"}}"
+6. You: "Based on my analysis, there are 5 active channels. The most active is #general with 120 messages today, followed by #random with 45 messages..."
+7. You: "[TOOL] end_response\\n{{}}"
 
-or 
-
-[TOOL] tool_name
-{{"param1": "value1", "param2": "value2"}}
-
-or
-
-[TOOL] end_response
-{{}}
-
-Important notes:
-1. The format must be EXACTLY as shown - the [TOOL] tag, followed by a space, followed by the tool name, followed by a newline, followed by a properly formatted JSON object.
-2. The JSON object MUST be properly formatted and valid JSON.
-3. For complex tasks, you MUST use the "handoff" tool to show intermediate progress.
-4. You MUST use the "end_response" tool to finish the conversation after providing your final answer.
-5. You MUST show which tools you are using and why.
-
-Example of a good response:
-[TOOL] handoff
-{{"message": "I'll help you list the channels in your Slack workspace. Let me gather that information."}}
-
-[TOOL] list_channels
-{{}}
-
-Remember, this exact format is required for tool execution to work properly.
+This specific flow with separate responses for each step is MANDATORY.
 """
                 ),
             }
@@ -198,7 +214,7 @@ Remember, this exact format is required for tool execution to work properly.
 
             # Send initial response to acknowledge the request
             initial_response = await self.llm_client.get_response(
-                messages + [{"role": "system", "content": "Generate a brief initial response acknowledging the user's request and mentioning what tools you plan to use. IMPORTANT: Do NOT include ANY [TOOL] tags in this response. This is just the initial greeting message."}]
+                messages + [{"role": "system", "content": "EXECUTE STEP 1 ONLY: Generate a brief initial greeting that acknowledges the user's request and explains what tools you plan to use. This should be plain text without any [TOOL] tags. Remember, this is just the first step of the conversation flow described in your instructions."}]
             )
             await say(text=initial_response, channel=channel, thread_ts=thread_ts)
             self.conversation_manager.add_message(conversation_id, "assistant", initial_response)
@@ -236,24 +252,36 @@ Remember, this exact format is required for tool execution to work properly.
             
             # Process any tool calls in the response
             if "[TOOL]" not in response:
-                logging.info("No tool calls found in response")
-                # If no tools called, just send the response and end
+                logging.info("No tool calls found in response - treating as final answer")
+                # If no tools called, this should be the final summary response
                 await say(text=response, channel=channel, thread_ts=thread_ts)
                 self.conversation_manager.add_message(conversation_id, "assistant", response)
-                response_complete = True
+                
+                # Prompt for the end_response tool
+                messages.append({"role": "system", "content": "Now proceed to STEP 5: End the conversation with the end_response tool. Send ONLY the end_response tool call."})
                 continue
                 
-            # Parse tool calls
+            # Parse tool calls - should be only one per response
             non_tool_content, tool_calls = ToolParser.split_response(response)
             logging.info(f"Parsed tool calls: {tool_calls}")
             
-            # Process each tool call
-            for tool_call in tool_calls:
-                tool_name = tool_call["tool_name"]
-                arguments = tool_call["arguments"]
+            if len(tool_calls) > 1:
+                logging.warning(f"Multiple tool calls found in a single response: {len(tool_calls)}. Only processing the first one.")
+                tool_call = tool_calls[0]
+                messages.append({"role": "system", "content": "REMINDER: You should only include ONE tool call per response. Continue with the next tool or step."})
+            elif len(tool_calls) == 0:
+                logging.warning("Tool tag found but no valid tools parsed")
+                messages.append({"role": "system", "content": "Your tool call could not be parsed. Please use the exact format specified in the instructions."})
+                continue
+            else:
+                tool_call = tool_calls[0]
                 
-                # Handle system tools
-                if tool_name == "handoff":
+            # Process the single tool call
+            tool_name = tool_call["tool_name"]
+            arguments = tool_call["arguments"]
+            
+            # Handle system tools
+            if tool_name == "handoff":
                     # Send intermediate message in italics
                     handoff_message = f"_{arguments.get('message', 'Working on your request...')}_"
                     await say(text=handoff_message, channel=channel, thread_ts=thread_ts)
@@ -333,14 +361,27 @@ Remember, this exact format is required for tool execution to work properly.
             
             # If no end_response tool was called, continue the loop
             if not response_complete and iterations < max_iterations:
-                # Add a prompt for the LLM to either continue with more tools or finalize the response
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "Continue processing the user's request. "
-                        "You can use more tools if needed. "
-                        "When you have all the information you need, provide a final response and use the end_response tool."
-                    )
+                # Add a prompt for the LLM to continue with the next step in the flow
+                if tool_name == "handoff":
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Continue with STEP 2: Make your next tool call following the conversation flow. "
+                            "Remember to send only ONE tool call in your next response, exactly in the format specified."
+                        )
+                    })
+                elif tool_name == "end_response":
+                    # Should be handled by the response_complete flag, but just in case
+                    response_complete = True
+                else:
+                    # After a regular tool call, prompt for a handoff message
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Continue with STEP 3: Send a handoff message explaining what you found and what you'll do next. "
+                            "If you have all the information needed, proceed to STEP 4 instead and provide your final answer without any tool calls."
+                        )
+                    })
                 })
             elif iterations >= max_iterations:
                 # Safety measure: end if we've hit the max iterations
